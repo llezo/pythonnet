@@ -1,5 +1,7 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 namespace Python.Runtime
@@ -12,62 +14,68 @@ namespace Python.Runtime
     /// </summary>
     internal class MethodBinder
     {
-        public ArrayList list;
-        public MethodBase[] methods;
-        public bool init = false;
-        public bool allow_threads = true;
+        private readonly ArrayList _methodArrayList = new ArrayList();
+        private MethodBase[] _sortedMethodArray;
+        private bool _isInitialized;
+        public bool AllowThreads = true;
 
-        internal MethodBinder()
+        internal MethodBinder(){}
+
+        internal MethodBinder(MethodInfo methodInfo)
         {
-            list = new ArrayList();
+            _methodArrayList.Add(methodInfo);
         }
 
-        internal MethodBinder(MethodInfo mi)
-        {
-            list = new ArrayList { mi };
-        }
+        public int Count => _methodArrayList.Count;
 
-        public int Count
+        internal void AddMethod(MethodBase methodBase)
         {
-            get { return list.Count; }
-        }
-
-        internal void AddMethod(MethodBase m)
-        {
-            list.Add(m);
+            _methodArrayList.Add(methodBase);
         }
 
         /// <summary>
         /// Given a sequence of MethodInfo and a sequence of types, return the
         /// MethodInfo that matches the signature represented by those types.
         /// </summary>
-        internal static MethodInfo MatchSignature(MethodInfo[] mi, Type[] tp)
+        internal static MethodInfo MatchSignature(IEnumerable<MethodInfo> methodInfos, Type[] typeArray)
         {
-            if (tp == null)
+            if (typeArray == null) return null;
+
+            var typeArrayLength = typeArray.Length;
+            /* OLD code replaced by the LINQ operation below
+            foreach (var methodInfo in methodInfos)
             {
-                return null;
-            }
-            int count = tp.Length;
-            foreach (MethodInfo t in mi)
-            {
-                ParameterInfo[] pi = t.GetParameters();
-                if (pi.Length != count)
+                var parameterInfos = methodInfo.GetParameters();
+                var parameterInfosLength = parameterInfos.Length;
+
+                if (parameterInfosLength != typeArrayLength)
                 {
                     continue;
                 }
-                for (var n = 0; n < pi.Length; n++)
+
+                 for (var n = 0; n < parameterInfos.Length; n++)
                 {
-                    if (tp[n] != pi[n].ParameterType)
+                    if (typeArray[n] != parameterInfos[n].ParameterType)
                     {
                         break;
                     }
-                    if (n == pi.Length - 1)
+                    if (n == parameterInfos.Length - 1)
                     {
-                        return t;
+                        return methodInfo;
                     }
                 }
             }
-            return null;
+            */
+            //Made a LINQ operation because we're just comparing and returning the first methodInfo available (or null)
+            return (from methodInfo in methodInfos
+                let parameterInfos = methodInfo.GetParameters()
+                let parameterInfosLength = parameterInfos.Length
+                where parameterInfosLength == typeArrayLength
+                where parameterInfos
+                    .TakeWhile((parameterInfo, n) => typeArray[n] == parameterInfo.ParameterType)
+                    .Where((parameterInfo, n) => n == parameterInfosLength - 1)
+                    .Any()
+                select methodInfo).FirstOrDefault();
         }
 
         /// <summary>
@@ -156,14 +164,14 @@ namespace Python.Runtime
         /// </summary>
         internal MethodBase[] GetMethods()
         {
-            if (!init)
+            if (!_isInitialized)
             {
                 // I'm sure this could be made more efficient.
-                list.Sort(new MethodSorter());
-                methods = (MethodBase[])list.ToArray(typeof(MethodBase));
-                init = true;
+                _methodArrayList.Sort(new MethodSorter());
+                _sortedMethodArray = (MethodBase[])_methodArrayList.ToArray(typeof(MethodBase));
+                _isInitialized = true;
             }
-            return methods;
+            return _sortedMethodArray;
         }
 
         /// <summary>
@@ -280,7 +288,7 @@ namespace Python.Runtime
             // loop to find match, return invoker w/ or /wo error
             MethodBase[] _methods = null;
             // NOTE: return the size of the args pointer (the number of parameter from the python call)
-            int pytonParameterCount = Runtime.PyTuple_Size(pythonParametersPtr);
+            int pythonParameterCount = Runtime.PyTuple_Size(pythonParametersPtr);
             //WHY: Why is that so widely scoped ?
             object pythonManagedParameterPtr;
             var isGeneric = false;
@@ -314,25 +322,22 @@ namespace Python.Runtime
                 //NOTE: Get the number of clr parameters
                 int clrParameterCount = clrParameterInfoArray.Length;
 
-                //NOTE: Initialize stuffs
-                //NOTE: It's not really a match, more like a pre-match based on the number of parameters in py and clr methods
-                //REFACTOR: Name it preMatch or paramCountMatch
                 var paramCountMatch = false;
                 //REFACTOR: Use var like the other local variables
                 var clrHasParamArray = false;
-                int clrParamsArrayStart = -1;
+                var clrParamsArrayStart = -1;
 
                 var byRefCount = 0;
 
-                if (pytonParameterCount == clrParameterCount)
+                if (pythonParameterCount == clrParameterCount)
                 {
                     paramCountMatch = true;
                 }
-                else if (pytonParameterCount < clrParameterCount)
+                else if (pythonParameterCount < clrParameterCount)
                 {
                     paramCountMatch = true;
                     defaultParameterList = new ArrayList();
-                    for (int v = pytonParameterCount; v < clrParameterCount; v++)
+                    for (int v = pythonParameterCount; v < clrParameterCount; v++)
                     {
                         if (clrParameterInfoArray[v].DefaultValue == DBNull.Value)
                         {
@@ -344,7 +349,7 @@ namespace Python.Runtime
                         }
                     }
                 }
-                else if (pytonParameterCount > clrParameterCount && clrParameterCount > 0 &&
+                else if (pythonParameterCount > clrParameterCount && clrParameterCount > 0 &&
                          Attribute.IsDefined(clrParameterInfoArray[clrParameterCount - 1], typeof(ParamArrayAttribute)))
                 {
                     // This is a `foo({...}, params object[] bar)` style method
@@ -360,14 +365,14 @@ namespace Python.Runtime
                     for (var n = 0; n < clrParameterCount; n++)
                     {
                         IntPtr pythonParameterPtr;
-                        if (n < pytonParameterCount)
+                        if (n < pythonParameterCount)
                         {
                             if (clrParamsArrayStart == n)
                             {
                                 // map remaining Python arguments to a tuple since
                                 // the managed function accepts it - hopefully :]
                                 //WHY: Hmmm it returns a lot of python paramter as one. isn't there a problem later ?
-                                pythonParameterPtr = Runtime.PyTuple_GetSlice(pythonParametersPtr, clrParamsArrayStart, pytonParameterCount);
+                                pythonParameterPtr = Runtime.PyTuple_GetSlice(pythonParametersPtr, clrParamsArrayStart, pythonParameterCount);
                             }
                             else
                             {
@@ -378,10 +383,9 @@ namespace Python.Runtime
                             // are ambiguous, hence comparison between Python and CLR types
                             // is necessary
                             clrConvertedParameterType = null;
-                            IntPtr pythonParameterPtrType;
+                            IntPtr pythonParameterPtrType = IntPtr.Zero;
                             if (_methods.Length > 1)
                             {
-                                pythonParameterPtrType = IntPtr.Zero;
                                 pythonParameterPtrType = Runtime.PyObject_Type(pythonParameterPtr);
                                 Exceptions.Clear();
                                 if (pythonParameterPtrType != IntPtr.Zero)
@@ -464,7 +468,7 @@ namespace Python.Runtime
                         {
                             if (defaultParameterList != null)
                             {
-                                methodParametersPtrArray[n] = defaultParameterList[n - pytonParameterCount];
+                                methodParametersPtrArray[n] = defaultParameterList[n - pythonParameterCount];
                             }
                         }
                     }
@@ -531,7 +535,7 @@ namespace Python.Runtime
                 return IntPtr.Zero;
             }
 
-            if (allow_threads)
+            if (AllowThreads)
             {
                 ts = PythonEngine.BeginAllowThreads();
             }
@@ -546,7 +550,7 @@ namespace Python.Runtime
                 {
                     e = e.InnerException;
                 }
-                if (allow_threads)
+                if (AllowThreads)
                 {
                     PythonEngine.EndAllowThreads(ts);
                 }
@@ -554,7 +558,7 @@ namespace Python.Runtime
                 return IntPtr.Zero;
             }
 
-            if (allow_threads)
+            if (AllowThreads)
             {
                 PythonEngine.EndAllowThreads(ts);
             }

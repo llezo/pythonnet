@@ -28,7 +28,7 @@ namespace Python.Runtime
         public MethodObject(Type type, string name, MethodInfo[] info, bool allow_threads)
         {
             _MethodObject(type, name, info);
-            binder.allow_threads = allow_threads;
+            binder.AllowThreads = allow_threads;
         }
 
         private void _MethodObject(Type type, string name, MethodInfo[] info)
